@@ -9,7 +9,7 @@ library(ellmer)
 # Define inputs --------------------------
 
 # define model
-model <- "mistralai/mixtral-8x7b-instruct"
+model <- "openai/gpt-oss-120b"
 
 # define events to predict
 events <- c(

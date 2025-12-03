@@ -15,7 +15,8 @@ chat <- chat_openrouter(
 )
 
 # start a conversation
-response <- chat$chat("Who is talking to me?")
+response <- chat$chat("Who is talking to me?",echo = F)
 
 # print the response
 print(response)
+

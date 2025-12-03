@@ -1,23 +1,27 @@
+# expectations.py
 # Multiple event probability predictions --------------------------
 
-# install required packages within Rstudio
-# library(reticulate)
-# py_install("pandas")
-# py_install("requests")
-# py_install("matplotlib")
-
+# Installation:
+# pip install openai pandas matplotlib
+# (in RStudio using reticulate:
+# reticulate::py_install(c("pandas", "matplotlib", "openai"))
 
 import os
+import json
 import pandas as pd
 import matplotlib.pyplot as plt
-import requests
-import json
+from openai import OpenAI
 
 # Setup API --------------------------
+# os.environ["OPENROUTER_API_KEY"] = "sk-ihr-key-hier"
 
-API_KEY = os.environ.get("OPENROUTER_API_KEY")
+client = OpenAI(
+    base_url="https://openrouter.ai/api/v1",
+    api_key=os.environ["OPENROUTER_API_KEY"],
+)
+
 SYSTEM_PROMPT = "You are an expert forecaster providing probability estimates. Reply with only the requested JSON structure and nothing else."
-MODEL = "meta-llama/llama-3.3-70b-instruct"
+MODEL = "openai/gpt-oss-120b"
 
 # Define events --------------------------
 
@@ -29,98 +33,80 @@ events = [
     "Humans will land on Mars by 2035"
 ]
 
-n = 3
+n = 3  # Anzahl der Wiederholungen
 
-# Run experiment --------------------------
-
+# 3. Experiment durchführen --------------------------
 results_list = []
+print(f"Frage {len(events) * n} Prompts ab...")
 
-print(f"Sending {len(events) * n} prompts to the LLM...")
+for event in events:
+    for i in range(n):
+        print(f"  ... {event[:15]}... (Run {i+1}/{n})")
+        
+        prompt = (f"Probability for: '{event}'? Give 0-100%. "
+                  'Return valid JSON object with keys: "min_prob", "prob", "max_prob".')
 
-for i, event in enumerate(events):
-    for j in range(n):
-        prompt = (
-            f"What is the probability that: {event}? "
-            f"Provide your answer as a percentage between 0 and 100. "
-            f"If uncertain, you may provide an interval. "
-            f"Return a JSON object with three fields: min_prob (minimum probability), prob (point estimate), and max_prob (maximum probability). "
-            f"If you have a point estimate with no uncertainty, use the same value for all three fields."
+        try:
+            response = client.chat.completions.create(
+                model=MODEL,
+                messages=[
+                          {"role": "system", "content": SYSTEM_PROMPT},
+                          {"role": "user", "content": prompt}
+                        ],
+                response_format={"type": "json_object"}
+            )
+
+            # Robustes Parsing
+            content = response.choices[0].message.content
+            start = content.find('{')
+            end = content.rfind('}') + 1
+            
+            if start != -1:
+                data = json.loads(content[start:end])
+                
+                results_list.append({
+                    "event": event,
+                    "run": i,
+                    "min": data["min_prob"],
+                    "p": data["prob"],
+                    "max": data["max_prob"]
+                })
+        except Exception as e:
+            print(f"    Fehler im Run {i+1}: {e}")
+
+# 4. Plotten --------------------------
+if results_list:
+    df = pd.DataFrame(results_list)
+    
+    plt.figure(figsize=(10, 6))
+    
+    # Wir weisen jedem Event eine Nummer auf der Y-Achse zu (0, 1, 2...)
+    events_unique = df["event"].unique()
+    y_map = {evt: i for i, evt in enumerate(events_unique)}
+    
+    # Plotten Loop
+    for idx, row in df.iterrows():
+        base_y = y_map[row["event"]]
+        # Kleiner Versatz je nach Run, damit Punkte nicht übereinander liegen
+        # Run 0 -> -0.1, Run 1 -> 0.0, Run 2 -> +0.1
+        offset = (row["run"] - 1) * 0.1 
+        
+        plt.errorbar(
+            x=row["p"],
+            y=base_y + offset,
+            xerr=[[row["p"] - row["min"]], [row["max"] - row["p"]]],
+            fmt='o',
+            color='tab:blue',
+            capsize=4
         )
 
-        response = requests.post(
-            url="https://openrouter.ai/api/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {API_KEY}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": MODEL,
-                "messages": [
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": prompt}
-                ]
-            }
-        )
+    # Achsenbeschriftung korrigieren
+    plt.yticks(range(len(events_unique)), events_unique)
+    plt.xlabel("Wahrscheinlichkeit (%)")
+    plt.title(f"LLM Vorhersagen ({n} Runs pro Event)")
+    plt.grid(axis='x', alpha=0.3)
+    plt.tight_layout()
+    plt.show()
+else:
+    print("Keine Ergebnisse.")
 
-        reply = response.json()['choices'][0]['message']['content']
-
-        reply_clean = reply.strip()
-        if reply_clean.startswith("```json"):
-            reply_clean = reply_clean[7:]
-        if reply_clean.startswith("```"):
-            reply_clean = reply_clean[3:]
-        if reply_clean.endswith("```"):
-            reply_clean = reply_clean[:-3]
-        reply_clean = reply_clean.strip()
-
-        result = json.loads(reply_clean)
-
-        results_list.append({
-            "event": event,
-            "run": j + 1,
-            "minp": result["min_prob"],
-            "p": result["prob"],
-            "maxp": result["max_prob"]
-        })
-
-
-print("Experiment complete.")
-
-# Combine results --------------------------
-
-final_predictions = pd.DataFrame(results_list)
-final_predictions["interval_width"] = final_predictions["maxp"] - final_predictions["minp"]
-final_predictions["is_interval"] = final_predictions["minp"] != final_predictions["maxp"]
-
-# Display results --------------------------
-
-print(final_predictions)
-
-# Plot results --------------------------
-
-fig, ax = plt.subplots(figsize=(10, 6))
-
-events_reversed = final_predictions["event"].unique()[::-1]
-y_positions = {event: i for i, event in enumerate(events_reversed)}
-
-for idx, row in final_predictions.iterrows():
-    y_pos = y_positions[row["event"]]
-    offset = (row["run"] - 1) * 0.15 - 0.075
-
-    ax.errorbar(
-        x=row["p"],
-        y=y_pos + offset,
-        xerr=[[row["p"] - row["minp"]], [row["maxp"] - row["p"]]],
-        fmt='o',
-        markersize=8,
-        capsize=5
-    )
-
-ax.set_yticks(range(len(events_reversed)))
-ax.set_yticklabels(events_reversed)
-ax.set_xlabel("Probability (%)")
-ax.set_title("LLM Probability Predictions with Uncertainty Intervals")
-ax.grid(axis='x', alpha=0.3)
-
-plt.tight_layout()
-plt.show()
